@@ -1,0 +1,68 @@
+name: personal release
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing personal source tag
+        required: true
+        default: personal-1.8.0-20261106.1
+permissions:
+  contents: write
+jobs:
+  build:
+    if: github.repository == 'Abel-Demere/fluent-sensors'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.203
+      - uses: microsoft/setup-msbuild@v3
+      - name: restore
+        run: dotnet restore FluentSensors/FluentSensors.csproj -p:Platform=x64 -r win-x64 -p:SelfContained=true
+      - name: build
+        run: msbuild FluentSensors/FluentSensors.csproj -p:Configuration=Release -p:Platform=x64 -p:RuntimeIdentifier=win-x64 -p:SelfContained=true
+      - name: regression checks
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force logs | Out-Null
+          foreach ($project in @('ThroughputFormatting','TaskbarPlacement','GraphCardMaterials')) {
+            dotnet run --project "tests/$project" 2>&1 | Tee-Object "logs/personal-$project.log"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+      - name: publish
+        run: msbuild FluentSensors/FluentSensors.csproj -t:Publish -p:Configuration=Release -p:Platform=x64 -p:PublishProfile=FolderProfile -p:NoBuild=true
+      - name: install compiler
+        run: choco install innosetup -y --no-progress
+      - name: package
+        shell: pwsh
+        run: |
+          & "C:/Program Files (x86)/Inno Setup 6/ISCC.exe" /DMyAppVersion=1.8.0 Setup/Inno_Setup.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $stage='Setup/Output/FluentSensors_Portable_1.8.0'
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item 'FluentSensors/bin/x64/Release/net10.0-windows10.0.19041.0/publish/win-x64/*' $stage -Recurse -Force
+          Copy-Item Setup/Portable/portable.txt $stage
+          Copy-Item docs/contributions/*.md $stage
+          Copy-Item docs/contributions/README.md "$stage/CONTRIBUTION-GUIDE.md"
+          Copy-Item docs/contributions/README.md Setup/Output/CONTRIBUTION-GUIDE.md
+          Compress-Archive -Path $stage -DestinationPath "$stage.zip"
+          Get-ChildItem Setup/Output -File | Where-Object Extension -in '.exe','.zip' | ForEach-Object { '{0}  {1}' -f (Get-FileHash $_.FullName).Hash,$_.Name } | Set-Content Setup/Output/SHA256SUMS.txt
+      - name: publish personal prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: pwsh
+        run: |
+          gh release upload $env:RELEASE_TAG Setup/Output/FluentSensors_Installer.exe Setup/Output/FluentSensors_Portable_1.8.0.zip Setup/Output/SHA256SUMS.txt Setup/Output/CONTRIBUTION-GUIDE.md --clobber --repo Abel-Demere/fluent-sensors
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release edit $env:RELEASE_TAG --draft=false --prerelease --repo Abel-Demere/fluent-sensors
+          exit $LASTEXITCODE
+      - name: save build logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: personal-build-logs
+          path: logs/
